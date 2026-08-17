@@ -1,91 +1,227 @@
+"""
+add_verifiability.py
+====================
+Assigns output-verifiability labels to upwork_pooled.csv.
+
+WHAT THIS SCRIPT DOES
+---------------------
+Nothing in this file decides a verifiability tier. Every tier is read from the
+classification workbook, in which each of the 100 search keywords was coded by
+hand against the two-step test documented in Appendix C.2 of the thesis:
+
+    Step 1  Does an external specification exist that is the primary and
+            disqualifying axis of the deliverable's quality?
+    Step 2  Does relational, cultural or aesthetic judgement also substantially
+            drive the verdict?
+
+    (1, 0) -> High        (0, 1) -> Low        (1, 1) -> Medium
+
+The script applies that hand-coding to the pooled observations and verifies it
+was applied consistently. Before writing anything it checks that every keyword
+in the dataset appears in the workbook, that no keyword is duplicated, that the
+scoring rule reproduces the stated tier for all 100 keywords, and that the
+workbook's observation counts match the dataset. Any failure aborts the run
+rather than writing a partial result.
+
+PRIMARY vs SECONDARY TIER
+-------------------------
+verif_group        KEYWORD-level tier. Primary; used by Model 2, the test of H2.
+                   The two-step test is applied at the keyword level, which is
+                   also the level at which rank is defined and at which Model 1b
+                   takes fixed effects.
+
+verif_group_isco   ISCO-GROUP-level tier. Secondary, retained as an available
+                   robustness coding and not used in the reported models. Groups
+                   whose keywords disagree collapse to Medium because ISCO-08
+                   offers no finer subdivision at that point, not because the
+                   deliverable is intermediate.
+
+OUTPUT
+------
+Rewrites upwork_pooled.csv in place, after copying it to a dated backup. Adds
+the two tier variables, their dummy indicators, the two step scores, the stated
+verification basis, and the refined ISCO code and title. Prints a summary of the
+resulting distribution and of any keyword whose tier differs from the labels
+already present in the file.
+
+Usage:  python add_verifiability.py
+"""
+
+import shutil
+from datetime import date
+from pathlib import Path
+
 import pandas as pd
-import numpy as np
 
-# ── 1. Load datasets ──────────────────────────────────────────────────────────
-df  = pd.read_csv("upwork_pooled.csv")
-rti = pd.read_csv("rti_country_specific_survey_predicted.csv")
+# ── 0. Configuration ──────────────────────────────────────────────────────────
+HERE = Path(__file__).resolve().parent
+POOLED = HERE / "upwork_pooled.csv"
+WORKBOOK = HERE / "ISCO_Verifiability_Classification_v5.xlsx"
+BACKUP = HERE / f"upwork_pooled_BACKUP_pre_v5_verif_{date.today().isoformat()}.csv"
 
-print(f"Pooled rows: {len(df)}")
+TIER_ORDER = ["high", "medium", "low"]
 
-# ── 2. Extract O*NET 2017 RTI scores (continuous robustness variable) ─────────
-# RTI is retained as a continuous control variable in robustness regressions.
-# It is NOT used to assign verifiability tiers (see §4.3 of thesis for rationale:
-# RTI conflates non-routine analytical with non-routine interpersonal — two task
-# types that have opposite verifiability profiles under ALM 2003).
-onet17_cols = [c for c in rti.columns if c.startswith("onet17_rti_isco2d")]
-onet17_row  = rti[onet17_cols].iloc[0]
+# ── 1. Load ───────────────────────────────────────────────────────────────────
+df = pd.read_csv(POOLED)
+km = pd.read_excel(WORKBOOK, sheet_name="Keyword Mapping")
+groups = pd.read_excel(WORKBOOK, sheet_name="ISCO Verifiability")
 
-rti_lookup = {
-    int(col.replace("onet17_rti_isco2d", "")): score
-    for col, score in onet17_row.items()
-}
+print(f"Pooled rows: {len(df):,}  |  workbook keywords: {len(km)}  "
+      f"|  workbook ISCO groups: {len(groups)}")
 
-print(f"RTI scores available for {len(rti_lookup)} ISCO 2-digit groups")
+df["keyword"] = df["keyword"].str.strip()
+km["keyword"] = km["keyword"].str.strip()
 
-# ── 3. Parse ISCO group number from pooled data ───────────────────────────────
-df["isco_num"] = df["isco_group"].str.extract(r"(\d+)$").astype(int)
+# ── 2. Integrity checks BEFORE touching anything ─────────────────────────────
+missing = sorted(set(df["keyword"]) - set(km["keyword"]))
+extra = sorted(set(km["keyword"]) - set(df["keyword"]))
+if missing:
+    raise SystemExit(f"ABORT — keywords in dataset but not in workbook: {missing}")
+if extra:
+    print(f"WARNING — workbook keywords absent from dataset: {extra}")
+if km["keyword"].duplicated().any():
+    raise SystemExit("ABORT — duplicate keywords in the workbook mapping sheet.")
 
-# ── 4. Map RTI scores (continuous robustness variable) ───────────────────────
-df["rti_score"] = df["isco_num"].map(rti_lookup)
+# The two-step scores must reproduce the stated tier for every keyword. This is
+# an audit of the hand-coding rather than a substitute for it: a mismatch means
+# the workbook is internally inconsistent, so the run stops instead of silently
+# preferring one column over the other.
+def tier_from_steps(s1, s2):
+    return {(1, 0): "high", (0, 1): "low", (1, 1): "medium"}.get((int(s1), int(s2)))
 
-unmatched_rti = df[df["rti_score"].isna()]["isco_group"].unique()
-if len(unmatched_rti) > 0:
-    print(f"ISCO groups with no O*NET RTI score (armed forces / agriculture): {unmatched_rti}")
-    print("Assigned median RTI for these groups.")
-    df["rti_score"] = df["rti_score"].fillna(df["rti_score"].median())
+derived = km.apply(
+    lambda r: tier_from_steps(r["step1_spec_is_primary"], r["step2_relational_cultural"]),
+    axis=1,
+)
+stated = km["keyword_verif"].str.strip().str.lower()
+bad = km.loc[derived != stated, ["keyword", "step1_spec_is_primary",
+                                 "step2_relational_cultural", "keyword_verif"]]
+if len(bad):
+    raise SystemExit(f"ABORT — scoring rule does not reproduce stated tier:\n{bad}")
+if derived.isna().any():
+    raise SystemExit("ABORT — a keyword scored (0,0); the scoring rule has no tier for it.")
+print("OK — two-step scores reproduce the stated keyword tier for all "
+      f"{len(km)} keywords.")
 
-# ── 5. Manual verifiability classification — ALM (2003) task framework ────────
-# Classification based on Autor, Levy & Murnane (2003) ALM task content:
-#
-# HIGH verifiability — Non-routine Cognitive Analytical (NRCA) + technical output:
-#   Outputs objectively testable against explicit criteria (code runs/fails,
-#   engineering spec met/not, data model accuracy measurable).
-#   ISCO: 21 Science/Engineering, 25 ICT, 35 ICT Technicians,
-#         43 Numerical Clerks, 71-74 Engineering trades, 81-83 Plant/Transport ops
-#
-# LOW verifiability — Non-routine Cognitive Interpersonal (NRCI):
-#   Output quality assessed through subjective, culturally-inflected criteria;
-#   not evaluable without domain expertise or long-term observation.
-#   ISCO: 22 Health, 23 Teaching, 26 Legal/Cultural, 32 Health Associates,
-#         51 Personal Services, 53 Personal Care, 94 Food Preparation
-#
-# MEDIUM — Mixed or context-dependent task content.
-# (Source: ISCO_Verifiability_Classification.xlsx for full rationale + citations)
+# Workbook N per ISCO group must match the dataset.
+gcheck = (km.merge(df["keyword"].value_counts().rename("n_rows"),
+                   left_on="keyword", right_index=True, how="left")
+            .groupby("isco_code")["n_rows"].sum()
+            .rename("n_dataset"))
+gcheck = groups.set_index("ISCO Code")["N (obs.)"].rename("n_workbook").to_frame().join(gcheck)
+gcheck["match"] = gcheck["n_workbook"] == gcheck["n_dataset"]
+if not gcheck["match"].all():
+    print("WARNING — N mismatch between workbook and dataset:")
+    print(gcheck[~gcheck["match"]].to_string())
+else:
+    print(f"OK — N matches the workbook for all {len(gcheck)} ISCO groups "
+          f"(total {int(gcheck['n_workbook'].sum()):,}).")
 
-HIGH_VERIF = {21, 25, 35, 43, 71, 72, 74, 81, 82, 83}
-LOW_VERIF  = {22, 23, 26, 32, 51, 53, 94}
+# ── 3. Preserve the outgoing labels for the change log ───────────────────────
+df["verif_group_prev"] = df.get("verif_group")
 
-def assign_verif(code):
-    if code in HIGH_VERIF:
-        return "high"
-    elif code in LOW_VERIF:
-        return "low"
-    else:
-        return "medium"
+# ── 4. Merge the classification onto the pooled data ─────────────────────────
+mapping = km.set_index("keyword")
 
-df["verif_group"] = df["isco_num"].apply(assign_verif)
+df["verif_group"] = df["keyword"].map(mapping["keyword_verif"].str.strip().str.lower())
+df["verif_group_isco"] = df["keyword"].map(mapping["group_verif"].str.strip().str.lower())
+df["verif_step1_spec"] = df["keyword"].map(mapping["step1_spec_is_primary"]).astype(int)
+df["verif_step2_relational"] = df["keyword"].map(mapping["step2_relational_cultural"]).astype(int)
+df["verif_basis"] = df["keyword"].map(mapping["verification_basis"])
+df["isco_code_v5"] = df["keyword"].map(mapping["isco_code"])
+df["isco_title_v5"] = df["keyword"].map(mapping["isco_title"])
 
-# ── 6. Binary indicators ──────────────────────────────────────────────────────
-df["low_verif"]  = (df["verif_group"] == "low").astype(int)
+if df["verif_group"].isna().any():
+    raise SystemExit("ABORT — unassigned rows after merge.")
+
+# ── 5. Dummies ───────────────────────────────────────────────────────────────
+# Primary (keyword-level) — the indicators the analysis script reads for Model 2.
+df["low_verif"] = (df["verif_group"] == "low").astype(int)
 df["high_verif"] = (df["verif_group"] == "high").astype(int)
-df["med_verif"]  = (df["verif_group"] == "medium").astype(int)
+df["med_verif"] = (df["verif_group"] == "medium").astype(int)
 
-# ── 7. Verification ───────────────────────────────────────────────────────────
-print("\nVerifiability classification per ISCO group (sorted by tier):")
-summary = (df[["isco_group", "isco_num", "verif_group", "rti_score"]]
-           .drop_duplicates()
-           .sort_values(["verif_group", "isco_num"]))
+# Secondary (ISCO-group-level) — robustness specifications only.
+df["low_verif_isco"] = (df["verif_group_isco"] == "low").astype(int)
+df["high_verif_isco"] = (df["verif_group_isco"] == "high").astype(int)
+df["med_verif_isco"] = (df["verif_group_isco"] == "medium").astype(int)
+
+# ── 6. RTI — descriptive covariate, read from the workbook ───────────────────
+# RTI is a continuous covariate reported as descriptive context and is NOT used
+# to assign tiers. Lewandowski et al. (2022) scores are defined at 2-digit ISCO,
+# so the finer groups inherit their parent 2-digit score.
+rti_v5 = df["isco_code_v5"].map(
+    groups.set_index("ISCO Code")["RTI Score (O*NET 2017)"]
+)
+if "rti_score" in df.columns:
+    delta = (rti_v5.round(3) - df["rti_score"].round(3)).abs()
+    n_diff = int((delta > 0.001).sum())
+    print(f"RTI: {n_diff:,} rows differ from the existing rti_score "
+          f"(workbook is rounded to 3 dp; existing column retained).")
+else:
+    df["rti_score"] = rti_v5
+
+# ── 7. Diagnostics ───────────────────────────────────────────────────────────
+def block(title):
+    print(f"\n{'=' * 78}\n{title}\n{'=' * 78}")
+
+block("KEYWORD-LEVEL TIER (verif_group) — PRIMARY, used for H2 / Model 2")
+print(df["verif_group"].value_counts().reindex(TIER_ORDER).rename("rows").to_frame()
+        .assign(pct=lambda t: (100 * t["rows"] / len(df)).round(1),
+                keywords=km["keyword_verif"].str.lower().value_counts().reindex(TIER_ORDER))
+        .to_string())
+
+block("ISCO-GROUP-LEVEL TIER (verif_group_isco) — SECONDARY, robustness only")
+print(df["verif_group_isco"].value_counts().reindex(TIER_ORDER).rename("rows").to_frame()
+        .assign(pct=lambda t: (100 * t["rows"] / len(df)).round(1))
+        .to_string())
+
+n_m2_kw = int(df["verif_group"].isin(["high", "low"]).sum())
+n_m2_gr = int(df["verif_group_isco"].isin(["high", "low"]).sum())
+print(f"\nModel 2 analytic sample (Medium excluded):")
+print(f"  keyword-level    : {n_m2_kw:,} obs ({100 * n_m2_kw / len(df):.1f}% of pooled)")
+print(f"  ISCO-group-level : {n_m2_gr:,} obs ({100 * n_m2_gr / len(df):.1f}% of pooled)")
+
+block("CROSS-TABULATION — keyword tier x ISCO-group tier (rows)")
+print(pd.crosstab(df["verif_group"], df["verif_group_isco"]).reindex(
+    index=TIER_ORDER, columns=TIER_ORDER, fill_value=0).to_string())
+
+block("CHANGE LOG — keywords whose tier differs from the previous classification")
+if df["verif_group_prev"].notna().any():
+    chg = (df.groupby("keyword")
+             .agg(isco_v5=("isco_code_v5", "first"),
+                  old=("verif_group_prev", "first"),
+                  new=("verif_group", "first"),
+                  n=("keyword", "size"))
+             .query("old != new")
+             .sort_values(["old", "new", "keyword"]))
+    print(f"{len(chg)} of {df['keyword'].nunique()} keywords change tier "
+          f"({chg['n'].sum():,} of {len(df):,} rows reclassified).\n")
+    print(chg.to_string())
+else:
+    print("No previous verif_group column found — nothing to compare.")
+
+block("PER-ISCO-GROUP SUMMARY")
+summary = (df.groupby(["isco_code_v5", "isco_title_v5"])
+             .agg(n=("keyword", "size"),
+                  n_keywords=("keyword", "nunique"),
+                  group_tier=("verif_group_isco", "first"),
+                  high_kw=("high_verif", "sum"),
+                  med_kw=("med_verif", "sum"),
+                  low_kw=("low_verif", "sum"))
+             .reset_index())
 print(summary.to_string(index=False))
 
-print("\nVerifiability group distribution (ISCO groups):")
-print(df.groupby("verif_group")["isco_num"].nunique().rename("n_groups"))
+# ── 8. Save ──────────────────────────────────────────────────────────────────
+df = df.drop(columns=["verif_group_prev"])
 
-print("\nVerifiability group distribution (rows):")
-print(df["verif_group"].value_counts())
+if not BACKUP.exists():
+    shutil.copy2(POOLED, BACKUP)
+    print(f"\nBackup written: {BACKUP.name}")
+else:
+    print(f"\nBackup already exists, not overwritten: {BACKUP.name}")
 
-print(f"\nHigh verif groups ({len(HIGH_VERIF)}): {sorted(HIGH_VERIF)}")
-print(f"Low  verif groups ({len(LOW_VERIF)}):  {sorted(LOW_VERIF)}")
-
-# ── 8. Save ───────────────────────────────────────────────────────────────────
-df.to_csv("upwork_pooled.csv", index=False)
-print(f"\nSaved: upwork_pooled.csv — now {df.shape[1]} columns")
+df.to_csv(POOLED, index=False)
+print(f"Saved: {POOLED.name} — {len(df):,} rows x {df.shape[1]} columns")
+print("\nNew/updated columns: verif_group (keyword-level, PRIMARY), "
+      "low_verif, high_verif, med_verif,\n  verif_group_isco (+ *_isco dummies), "
+      "verif_step1_spec, verif_step2_relational, verif_basis,\n  isco_code_v5, isco_title_v5")
