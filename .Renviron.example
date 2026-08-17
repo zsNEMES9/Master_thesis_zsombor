@@ -1,0 +1,24 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  TEMPLATE — safe to commit. Contains no real secrets.
+#
+#  This is R's equivalent of a python-dotenv .env file. R reads a file named
+#  .Renviron automatically at startup, so no package is needed.
+#
+#  SETUP
+#    1. Copy this file to .Renviron in the project root:
+#           file.copy(".Renviron.example", ".Renviron")
+#    2. Replace the placeholder below with your real key.
+#    3. Restart R. Environment variables are only read at startup.
+#    4. Check it worked:  Sys.getenv("NAMSOR_API_KEY")
+#
+#  .Renviron is listed in .gitignore, so the real key never reaches the repo.
+#
+#  Format notes: KEY=value, one per line, no "export", no spaces around the =,
+#  no quotes needed. The file must end with a newline or R silently ignores
+#  the last line.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Used by genderize_namsor.R. Free key from https://namsor.app/
+# Only required if the gender imputation actually has work to do; on the
+# distributed dataset every label is already resolved and the script skips.
+NAMSOR_API_KEY=your_key_here
