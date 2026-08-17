@@ -42,15 +42,51 @@ Four hypotheses are tested against five specifications:
 | File | Purpose |
 |---|---|
 | `add_global_south.py` | Adds World Bank income group and the Global South indicator |
-| `add_verifiability.py` | Adds the output-verifiability tier per keyword |
+| `add_verifiability.py` | Applies the output-verifiability classification to the pooled data |
 | `ilo_data.r` | ILO / ISCO-08 occupational data used for keyword classification |
 | `genderize_namsor.R` | Resolves gender labels from first names via the NamSor API |
+
+#### A note on the verifiability classification
+
+The output-verifiability tiers were coded **by hand**, not derived by the script.
+Each of the 100 search keywords was scored by the author against the two-step
+test set out in Appendix C.2 of the thesis:
+
+- **Step 1** — does an external specification exist that is the primary and
+  disqualifying axis of the deliverable's quality?
+- **Step 2** — does relational, cultural or aesthetic judgement also
+  substantially drive the verdict?
+
+with the mechanical rule (1,0) → High, (0,1) → Low, (1,1) → Medium.
+
+`add_verifiability.py` contains no classification logic. It reads the completed
+coding from the classification workbook, applies it to the pooled observations,
+and refuses to run if the coding is internally inconsistent — it checks that
+every keyword is present and unique, that the scoring rule reproduces the stated
+tier for all 100 keywords, and that observation counts reconcile.
+
+The full coding, with each keyword's Step 1 and Step 2 scores and both the
+keyword-level and ISCO-group-level tiers, is printed in **Table C2** of the
+thesis (pp. 79–81), so the classification can be checked independently of this
+repository.
 
 ### Analysis (R)
 
 | File | Purpose |
 |---|---|
 | `MasterThesisCode_submission.R` | Full analysis — descriptives, five reported models, supplementary analyses, all tables and figures |
+
+### Configuration
+
+The scrapers write to paths defined near the top of each file. These are set to
+relative defaults and will almost certainly need changing for your setup:
+
+| Setting | File | Purpose |
+|---|---|---|
+| `THESIS_DIR` | `Upwork_scraper_final.py`, `upwork_scraper_finalv2.py`, `Phase2_scraper.py` | Output directory for scraped pages |
+| `--user-data-dir` | same three files | Chrome profile directory, kept persistent so cookies and session state carry across runs |
+
+`ilo_data.r` no longer calls `setwd()`; set your working directory before sourcing it.
 
 ### Pipeline order
 
@@ -73,7 +109,15 @@ MasterThesisCode_submission.R                         →  analysis, tables, fig
 
 The collection instrument is fully documented here and in Appendix B of the thesis, so the dataset can be regenerated. Note that search rankings change continuously; a fresh collection will not reproduce these exact figures.
 
-For access to the analysis dataset for verification purposes, contact the author.
+**The classification workbook is not included either.** `add_verifiability.py`
+reads `ISCO_Verifiability_Classification_v5.xlsx` and will stop with an error if
+it is absent, so that step of the pipeline cannot be re-run from this repository
+alone. The workbook holds no information beyond what Table C2 of the thesis
+already prints in full — every keyword, both step scores and both tiers — so it
+is omitted rather than duplicated.
+
+For access to the analysis dataset or the classification workbook for
+verification purposes, contact the author.
 
 ---
 
